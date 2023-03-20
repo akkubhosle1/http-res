@@ -2,12 +2,14 @@ package main
 
 import (
     "bufio"
+    "flag"
     "fmt"
     "io/ioutil"
     "net/http"
     "os"
     "sort"
     "strings"
+    "sync"
 )
 
 type result struct {
@@ -17,28 +19,47 @@ type result struct {
 }
 
 func main() {
+    var numConcurrent int
+    flag.IntVar(&numConcurrent, "c", 1, "Number of concurrent requests to make")
+    flag.Parse()
+
     scanner := bufio.NewScanner(os.Stdin)
 
     var results []result
+    var wg sync.WaitGroup
+    requests := make(chan string)
+
+    for i := 0; i < numConcurrent; i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for url := range requests {
+                resp, err := http.Get(url)
+                if err != nil {
+                    fmt.Fprintf(os.Stderr, "error fetching %s: %v\n", url, err)
+                    continue
+                }
+                defer resp.Body.Close()
+
+                body, err := ioutil.ReadAll(resp.Body)
+                if err != nil {
+                    fmt.Fprintf(os.Stderr, "error reading body for %s: %v\n", url, err)
+                    continue
+                }
+
+                results = append(results, result{url, len(body), resp.StatusCode})
+            }
+        }()
+    }
 
     for scanner.Scan() {
         url := scanner.Text()
-
-        resp, err := http.Get(url)
-        if err != nil {
-            fmt.Fprintf(os.Stderr, "error fetching %s: %v\n", url, err)
-            continue
-        }
-        defer resp.Body.Close()
-
-        body, err := ioutil.ReadAll(resp.Body)
-        if err != nil {
-            fmt.Fprintf(os.Stderr, "error reading body for %s: %v\n", url, err)
-            continue
-        }
-
-        results = append(results, result{url, len(body), resp.StatusCode})
+        requests <- url
     }
+
+    close(requests)
+
+    wg.Wait()
 
     if err := scanner.Err(); err != nil {
         fmt.Fprintf(os.Stderr, "error reading input: %v\n", err)
